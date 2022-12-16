@@ -1,0 +1,3 @@
+To build on the host : "make host" --> uses build-host as the build directory
+
+To build on the BF : "make bf" --> uses build-bf as the build directory
