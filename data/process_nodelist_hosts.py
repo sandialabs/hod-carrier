@@ -8,8 +8,8 @@ import re
 import sys
 import os
 
-# [sllevy@klogin2 ~]$ srun -N 1 -n 1 echo $SLURM_JOB_NODELIST
-# gn[3-4]
+# NOTE : this scripts assumes that the hostname of the BF2 nodes can be determined by appending the
+# Slurm-visible hostname with "-bf"
 
 nodelist_re = re.compile("(?P<partition>[a-z-]+(?:-bf)?)\[?(?P<nodenumbers>[0-9,-]+)\]?")
 noderange_re = re.compile("(?P<start>\d+)-(?P<end>\d+)")
@@ -17,21 +17,8 @@ noderange_re = re.compile("(?P<start>\d+)-(?P<end>\d+)")
 # STRING for aggregating results
 result = ""
 
-"""
-if len(sys.argv) == 2:
-  slurm_nodelist = sys.argv[1]
-  ppn = int(sys.argv[2])
-else:
-  print("USAGE: %s <nodelist> <ppn>" % (sys.argv[0]))
-  exit(-1)
-"""
-
 slurm_nodelist = os.environ['SLURM_JOB_NODELIST']
 nodelist_strings = re.findall("[a-z-]+(?:-bf)?\[?[0-9,-]+\]?", slurm_nodelist)
-
-## There should be BlueField nodes
-# !!!! DEEbug !!!!
-#assert any(map(lambda x: "-bf" in x, nodelist_strings))
 
 for nodelist_string in nodelist_strings:
   if "-bf" in nodelist_string:
@@ -52,9 +39,7 @@ for nodelist_string in nodelist_strings:
 
       for n in range(start,end+1):
         if len(result) > 0:
-          #result += ","
           result += " "
-        #result += ("%s%d:%d" % (partition,n,ppn))
         result += ("%s%d" % (partition,n))
   else:
     print("WHOOPS: no match")
