@@ -17,7 +17,10 @@ ENV_VARS+="export IBVERBS_CLIENT_SOCKET_PORT=${CLIENT_PORT}; "
 echo "SLURM_JOB_NODELIST = $SLURM_JOB_NODELIST" 
 
 for HOST in $HOSTLIST; do
-  BF="${HOST}-bf"
+  # NOTE: Naming of BF device will vary across systems and the following 
+  #       should be updated accordingly
+  #BF="${HOST}-bf"
+  BF=`./get_bf_hostname.py $HOST`
   CLIENTADDR=`./lookup_host_ip.py $HOST`
   ENV_VARS+="export IBVERBS_CLIENT_IP_ADDR=$CLIENTADDR;"
   ENV_VARS+="export IBVERBS_SERVER_DEVICE=mlx5_0;"
