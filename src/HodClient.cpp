@@ -20,7 +20,9 @@
 #include <unistd.h>
 #include <errno.h>
 
-#define DEBUG_CONNECTION
+#define BUFFER_SIZE 1024
+
+//#define DEBUG_CONNECTION
 
 #ifdef DEBUG_CONNECTION
 #define dbg_connection(...) {printf("[CLIENT] "); printf(__VA_ARGS__); fflush(stdout);}
@@ -36,7 +38,10 @@
 #define dbg_unused(v) (void)v
 #endif
 
-int Client::init()
+Client::Client() : ibv(), pending_transfers(), registered_memory() 
+{ };
+
+int Client::init(std::string init_msg)
 {
   int rc     = 0;
 
@@ -99,12 +104,6 @@ int Client::init()
     return -1;
   }
 
-  rc = ibv.setup_rdma_channel();
-  if (rc) {
-    printf("[ibverbs_transport] setup_rdma_channel FAILED");
-    return -1;
-  }
-
   rc = ibv.create_qps();
   if (rc) {
     printf("[ibverbs_transport] create_qps FAILED");
@@ -113,7 +112,7 @@ int Client::init()
 
   dbg_connection("[ibverbs_transport] InfiniBand (ibverbs) Initialized\n");
 
-  char buffer[256];
+  char buffer[BUFFER_SIZE];
   int n;
 
   socklen_t length =  sizeof(server_addr);
@@ -125,53 +124,22 @@ int Client::init()
   }
   dbg_connection("CLIENT success (server_sockfd (%p) = %d)!\n", &server_sockfd, server_sockfd);
 
-  /* SEND RDMA qpn */
-  memset(buffer, 0, 256);
-  sprintf(buffer, "%d", ibv.get_rdma_qpn()); 
-  dbg_connection("SEND RDMA qpn = %s\n", buffer);
+  /* SEND CMD qpn, lid, and init_msg */
+  memset(buffer, 0, BUFFER_SIZE);
+  sprintf(buffer, "%d:%d:%sfoo", ibv.get_cmd_qpn(), ibv.get_lid(), init_msg.c_str()); 
   n = write(server_sockfd, buffer, strlen(buffer));
   dbg_unused(n);
   dbg_connection("SEND %d bytes\n", n);
 
-  /* RECEIVE RDMA qpn */
-  memset(buffer, 0, 256);
-  n = read(server_sockfd, buffer, 255);
-  dbg_unused(n);
-  dbg_connection("RECEIVE %d bytes\n", n);
-  dbg_connection("RECEIVE RDMA qpn = %s\n", buffer);
-  ibv.set_peer_rdma_qpn(atoi(buffer));
+  /* RECEIVE CMD qpn, lid */
+  memset(buffer, 0, BUFFER_SIZE);
+  n = read(server_sockfd, buffer, BUFFER_SIZE-1);
 
-  /* SEND CMD qpn */
-  memset(buffer, 0, 256);
-  sprintf(buffer, "%d", ibv.get_cmd_qpn()); 
-  printf("SEND CMD qpn = %s\n", buffer);
-  n = write(server_sockfd, buffer, strlen(buffer));
-  dbg_unused(n);
-  dbg_connection("SEND %d bytes\n", n);
+  char *element = strtok(buffer,":");
+  ibv.set_peer_cmd_qpn(atoi(element));
 
-  /* RECEIVE CMD qpn */
-  memset(buffer, 0, 256);
-  n = read(server_sockfd, buffer, 255);
-  dbg_unused(n);
-  dbg_connection("RECEIVE %d bytes\n", n);
-  dbg_connection("RECEIVE CMD qpn = %s\n", buffer);
-  ibv.set_peer_cmd_qpn(atoi(buffer));
-
-  /* SEND lid */
-  memset(buffer, 0, 256);
-  sprintf(buffer, "%d", ibv.get_lid()); 
-  dbg_connection("SEND RDMA lid = %s\n", buffer);
-  n = write(server_sockfd, buffer, strlen(buffer));
-  dbg_unused(n);
-  dbg_connection("SEND %d bytes\n", n);
-
-  /* RECEIVE lid */
-  memset(buffer, 0, 256);
-  n = read(server_sockfd, buffer, 255);
-  dbg_unused(n);
-  dbg_connection("RECEIVE %d bytes\n", n);
-  dbg_connection("RECEIVE RDMA lid = %s\n", buffer);
-  ibv.set_peer_lid(atoi(buffer));
+  element = strtok(NULL,":");
+  ibv.set_peer_lid(atoi(element));
 
   if( ibv.transition_to_ready() < 0 ) return -1;
   dbg_connection("[ibverbs_transport] READY\n");
@@ -180,107 +148,103 @@ int Client::init()
   return 0;
 }
 
-#define BUFFER_SIZE 256
-int Client::run(char *rdma_buffer, size_t rdma_buffer_size)
+int Client::ready()
+{
+  char buffer[BUFFER_SIZE];
+  memset(buffer, 0, BUFFER_SIZE);
+  sprintf(buffer, "READY");
+  write(server_sockfd, buffer, strlen(buffer));
+
+  char server_buffer[BUFFER_SIZE];
+  memset(server_buffer, 0, BUFFER_SIZE);
+  read(server_sockfd, server_buffer, BUFFER_SIZE-1);
+  if( strcmp(server_buffer, "READY") != 0 ) {
+    printf("(Client) READY failed (%s)\n", server_buffer);
+    fflush(stdout);
+    abort();
+  }
+
+  return 0;
+}
+
+struct ibv_mr *Client::register_memory(unsigned char *rdma_buffer, size_t rdma_buffer_size)
+{
+  struct ibv_mr *local_ibv_mr = ibv.register_memory(rdma_buffer, rdma_buffer_size, IBV_ACCESS_REMOTE_READ);
+  return local_ibv_mr;
+}
+
+void Client::deregister_memory(struct ibv_mr *registered_rdma_buffer)
+{
+  ibv.deregister_memory(registered_rdma_buffer);
+}
+  
+int Client::request_transfer(struct ibv_mr *local_ibv_mr, size_t rdma_buffer_size,
+                             std::function<void(struct ibv_mr *)> callback)
 {
   int rc;
-  dbg_connection("==== RUN ====\n");
-  dbg_connection("rdma_buffer = %p / rdma_buffer_size = %ld\n", rdma_buffer, rdma_buffer_size);
+  std::list<std::pair< struct ibv_mr *,size_t > > buffer_list;
 
-  /* SEND MR */
-  struct ibv_mr *local_ibv_mr = ibv.register_memory(rdma_buffer, rdma_buffer_size);
+  buffer_list.push_back(std::make_pair(local_ibv_mr, rdma_buffer_size));
+  rc = request_transfer(buffer_list, callback);
+  return rc;
+}
+
+int Client::request_transfer(std::list<std::pair< struct ibv_mr *,size_t > > &buffer_list,
+                             std::function<void(struct ibv_mr *)> callback)
+{
+  dbg_connection("==== REQUEST TRANSFER ====\n");
 
   // ------ SOCKET code -------
   int n;
-  char buffer[BUFFER_SIZE];
+  std::list<std::pair< struct ibv_mr *,size_t > >::iterator it;
 
-  dbg_connection("(RDMA buffer = %p / local_ibv_mr = 0x%x)\n", 
-                 rdma_buffer, local_ibv_mr->rkey);
-  dbg_connection("(RDMA buffer = 0x%x 0x%x 0x%x\n", 
-                 rdma_buffer[0], rdma_buffer[1], rdma_buffer[2]);
-
-  /* ---- */
-  struct ibv_sge     sge;
-  struct ibv_recv_wr recv_wr;
-
-  memset(&sge, 0, sizeof(sge));
-  memset(&recv_wr, 0, sizeof(recv_wr));
-  sge.addr   = (uint64_t)rdma_buffer;
-  sge.length = rdma_buffer_size;
-  sge.lkey   = local_ibv_mr->lkey;
-
-  recv_wr.next    = nullptr;
-  recv_wr.sg_list = &sge;
-  recv_wr.num_sge = 1;
-  recv_wr.wr_id = (uint64_t)0xBADFACE;
-
-  dbg_connection("post_recv() - cmd_msg=%p - sge.addr=%lx ; sge.length=%u ; sge.lkey=%x\n",
-                 rdma_buffer, sge.addr, sge.length, sge.lkey);
-
-  rc = ibv.post_recv_wr(&recv_wr);
-  if( rc < 0 ) {
-    printf("post_recv() FAILED\n");
-    return -1;
-  } 
-  
-  /* ---- */
+  for( it = buffer_list.begin(); it != buffer_list.end(); ++it ) {
+    dbg_connection("(RDMA buffer = %p (%ld bytes) / rkey = 0x%x)\n", 
+                   (it->first)->addr, (it->first)->length, (it->first)->rkey);
+  }
 
   /* SEND rdma_buffer, buffer size, and rkey */
-  memset(buffer, 0, BUFFER_SIZE);
-  sprintf(buffer, "0x%lx:0x%lx:0x%x", (uint64_t)local_ibv_mr->addr, 
-          (uint64_t)rdma_buffer_size, local_ibv_mr->rkey); 
 
-  n = write(server_sockfd, buffer, strlen(buffer));
+  // the SPECIFICATION of EACH memory region requires up to 49 characters
+  size_t request_buffer_size = buffer_list.size()*49*sizeof(char)+1;
+  char *request_buffer = (char *)malloc(request_buffer_size);
+
+  char *write_ptr = request_buffer;
+  for( it = buffer_list.begin(); it != buffer_list.end(); ++it ) {
+    n = sprintf(write_ptr, "0x%lx:0x%lx:0x%x,", (uint64_t)(it->first)->addr, 
+                (uint64_t)it->second, (it->first)->rkey); 
+    write_ptr += n;
+    pending_transfers[(it->first)->addr] = std::make_tuple((it->first), callback);
+  }
+
+  n = write(server_sockfd, request_buffer, strlen(request_buffer));
   if( n < 0 ) {
     printf("[ibverbs_transport] ERROR: %d(%s)\n", errno, strerror(errno));
     return -1;
   }
   dbg_unused(n);
   dbg_connection("SEND %d bytes\n", n);
-  dbg_connection("SEND buffer = %s\n", buffer);
+  dbg_connection("SEND buffer = %s\n", request_buffer);
 
   /* RECEIVE ACK */
-  memset(buffer, 0, 256);
-  n = read(server_sockfd, buffer, 255);
+  char ack_buffer[1024];
+  memset(ack_buffer, 0, 1024);
+  n = read(server_sockfd, ack_buffer, 1023);
   dbg_unused(n);
   dbg_connection("RECEIVE %d bytes\n", n);
-  dbg_connection("RECEIVE ACK = %s\n", buffer);
+  dbg_connection("RECEIVE ACK = %s\n", ack_buffer);
 
   /* CLEAN UP completed transfers. */
-  char *memory;
-  char *element = strtok(buffer,":");
-  while( 1 ) {
-    element = strtok(NULL,":");
-    if( element == NULL ) {
-      break;
-    }
-    memory = (char *)strtol(element, NULL, 0);
-    if( pending_transfers.size() > 1 ) {
-        printf("**** WHOOPS : Number of PENDING CHECKPOINTS = %ld\n", pending_transfers.size());
-    }
-    while( !pending_transfers.empty() ) {
-      std::pair<char *,struct ibv_mr *> next = pending_transfers.front();
-      pending_transfers.pop();
-      if( next.first != memory ) {
-        printf("**ERROR** : out-of-order ACKNOWLEDGEMENT (ACKed %p / FOUND %p)\n", 
-               memory, next.first);
-      } else {
-        dbg_connection("FOUND matching ADDRESS (FREE %p)\n", memory);
-        free(next.first);
-        ibv_dereg_mr(next.second);
-        break;
-      }
-    }
-  }
-  
-  pending_transfers.push(std::make_pair(rdma_buffer,local_ibv_mr));
+  process_completed_buffer_list(ack_buffer);
+   
+  free(request_buffer);
   return 0;
 }
 
 int Client::stop()
 {
   /* SEND complete message */
-  char buffer[256];
+  char buffer[1024];
   memset(buffer, 0, 256);
   sprintf(buffer, "%s", "COMPLETE");
   dbg_connection("SENDING complete message\n");
@@ -289,15 +253,12 @@ int Client::stop()
   dbg_connection("SENT %d bytes\n", n); 
 
   /* RECEIVE ACK */
-  memset(buffer, 0, 256);
-  n = read(server_sockfd, buffer, 255);
+  memset(buffer, 0, 1024);
+  n = read(server_sockfd, buffer, 1023);
   dbg_unused(n);
   dbg_connection("RECEIVE %d bytes\n", n);
   dbg_connection("RECEIVE ACK COMPLETE = %s\n", buffer);
-  if( strcmp("COMPLETE", buffer) != 0 ) {
-    printf("*** ERROR: COMPLETE ack not received\n");
-    fflush(stdout);
-  }
+  process_completed_buffer_list(buffer);
 
   if( close(server_sockfd) != 0 ) {
     printf("ERROR: FAILED to close SERVER socket\n");
@@ -315,4 +276,40 @@ int Client::stop()
   }
 
   return 0;
+}
+
+// EXECUTE the callback for all of the buffers that have been transferred.
+void Client::process_completed_buffer_list(char *buffer_list)
+{
+  char *element = strtok(buffer_list, ":");
+
+  // Skip the preamble (e.g., "ACK" or "COMPLETE") text
+  element = strtok(NULL,":");
+
+  while( element != nullptr ) {
+    // GET address of buffer that completed
+    void *memory = (void *)strtol(element, NULL, 0);
+
+    std::map< void *, std::tuple< struct ibv_mr *, std::function<void(struct ibv_mr *)> > >::iterator map_iter;
+
+    map_iter = pending_transfers.find(memory);
+    if( map_iter != pending_transfers.end() ) {
+
+      // GET the value (memory descriptor + callback) associated with the completed buffer
+      std::tuple< struct ibv_mr *, std::function<void(struct ibv_mr *)> > next = 
+        (*map_iter).second;
+
+      // GET the memory descriptor and callback for the completed buffer
+      struct ibv_mr *mr = std::get<0>(next);
+      std::function<void(struct ibv_mr *)> callback = std::get<1>(next);
+      callback(mr);
+      pending_transfers.erase(map_iter);
+
+    } else {
+      printf("ERROR: unable to LOCATE completed buffer @ %p (pending_transfers = %ld)\n", 
+             memory, pending_transfers.size());
+    }
+  
+    element = strtok(NULL,":");
+  }
 }
