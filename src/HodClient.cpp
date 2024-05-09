@@ -67,7 +67,12 @@ int Client::init(std::string init_msg)
     return -1;
   }
   strncpy(ifr.ifr_name, client_socket_if, IFNAMSIZ-1);
-  ioctl(host_sockfd, SIOCGIFADDR, &ifr);
+  rc = ioctl(host_sockfd, SIOCGIFADDR, &ifr);
+  if( rc < 0 ) {
+    printf("*** WHOOPS: ioctl failed, unable to get IP address of (%s)\n", client_socket_if);
+    return -1;
+  }
+
   char *addr_str = inet_ntoa(((struct sockaddr_in *)&ifr.ifr_addr)->sin_addr);
   dbg_connection("FOUND address for: %s / %s\n", ifr.ifr_name, addr_str);
 
