@@ -20,6 +20,12 @@ This repository contains the code necessary to build four components:
 - *hod_server_app* : a simple example of an executable that launches a hod-carrier server and
   services requests from a client instance running on the host processor.
 
+**Running the simple hod-carrier example**
+
+In the *data* directory is a run script called *run-bf-test.sh*.  Note that you'll need to add
+standard Slurm arguments when you invoke this command (e.g., partition name, account information,
+etc.).  For example, to run on our Glinda system, we use: "./run-bf-test.sh -p glinda".
+
 **Why "hod-carrier"?**
 
 A hod carrier is a person who delivers construction supplies (e.g., mortar, brick, stone) to
